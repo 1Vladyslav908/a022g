@@ -1,0 +1,5 @@
+
+# Generated build artifacts
+/out/
+/arch/arm/boot/Image
+/arch/arm64/boot/Image
