@@ -157,8 +157,8 @@ struct scan_control {
 /*
  * From 0 .. 100.  Higher means more swappy.
  */
-/* DMK: perf2 swappiness 60 -> 100 (old 60) */
-int vm_swappiness = 100;
+/* DMK: perf2 swappiness 60 -> 100 (old 60); DMK #29: 100 -> 30 */
+int vm_swappiness = 30;
 /*
  * The total number of pages which are beyond the high watermark within all
  * zones.

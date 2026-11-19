@@ -32,6 +32,7 @@
 #include <linux/slab.h>
 #include <linux/ratelimit.h>
 #include <linux/oom.h>
+#include <linux/simple_lmk.h>
 #include <linux/notifier.h>
 #include <linux/topology.h>
 #include <linux/sysctl.h>
@@ -3743,8 +3744,10 @@ __alloc_pages_direct_reclaim(gfp_t gfp_mask, unsigned int order,
 	bool drained = false;
 
 	*did_some_progress = __perform_reclaim(gfp_mask, order, ac);
-	if (unlikely(!(*did_some_progress)))
+	if (unlikely(!(*did_some_progress))) {
+		simple_lmk_start_reclaim();
 		return NULL;
+	}
 
 retry:
 	page = get_page_from_freelist(gfp_mask, order, alloc_flags, ac);
