@@ -388,10 +388,6 @@ static irqreturn_t ilitek_plat_isr_top_half(int irq, void *dev_id)
 
 static irqreturn_t ilitek_plat_isr_bottom_half(int irq, void *dev_id)
 {
-	if (mutex_is_locked(&ilits->touch_mutex)) {
-		ILI_DBG("%s touch is locked, ignore\n", __func__);
-		return IRQ_HANDLED;
-	}
 	mutex_lock(&ilits->touch_mutex);
 	ili_report_handler();
 	mutex_unlock(&ilits->touch_mutex);

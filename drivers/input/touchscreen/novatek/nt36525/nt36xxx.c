@@ -1626,95 +1626,22 @@ static int32_t nvt_ts_point_data_checksum(uint8_t *buf, uint8_t length)
 }
 #endif /* POINT_DATA_CHECKSUM */
 
-#define NVT_TS_LOCATION_DETECT_SIZE	6
-/************************************************************
-*  720  * 1480 : <48 96 60> indicator: 24dp navigator:48dp edge:60px dpi=320
-* 1080  * 2220 :  4096 * 4096 : <133 266 341>  (approximately value)
-************************************************************/
-static void location_detect(struct nvt_ts_data *ts, char *loc, int x, int y)
+static void nvt_ts_update_coord(struct nvt_ts_data *ts)
 {
 	int i;
-
-	for (i = 0; i < NVT_TS_LOCATION_DETECT_SIZE; ++i)
-		loc[i] = 0;
-
-	if (x < ts->platdata->area_edge)
-		strcat(loc, "E.");
-	else if (x < (ts->platdata->abs_x_max - ts->platdata->area_edge))
-		strcat(loc, "C.");
-	else
-		strcat(loc, "e.");
-
-	if (y < ts->platdata->area_indicator)
-		strcat(loc, "S");
-	else if (y < (ts->platdata->abs_y_max - ts->platdata->area_navigation))
-		strcat(loc, "C");
-	else
-		strcat(loc, "N");
-}
-
-static void nvt_ts_print_coord(struct nvt_ts_data *ts)
-{
-	int i;
-	char location[NVT_TS_LOCATION_DETECT_SIZE] = { 0, };
 
 	for (i = 0; i < TOUCH_MAX_FINGER_NUM; i++) {
-		location_detect(ts, location, ts->coords[i].x, ts->coords[i].y);
-
 		if (ts->coords[i].press && !ts->coords[i].p_press) {
 			ts->touch_count++;
-//			ts->all_finger_count++;
-
-#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
-			input_info(true, &ts->client->dev, "[P] tId:%d.%d x:%d y:%d major:%d minor:%d loc:%s tc:%d type:%X\n",
-				i, (ts->input_dev->mt->trkid - 1) & TRKID_MAX,
-				ts->coords[i].x, ts->coords[i].y, ts->coords[i].w_major, ts->coords[i].w_minor,
-				location, ts->touch_count, ts->coords[i].status);
-#else
-			input_info(true, &ts->client->dev, "[P] tId:%d.%d major:%d minor:%d loc:%s tc:%d type:%X\n",
-				i, (ts->input_dev->mt->trkid - 1) & TRKID_MAX,
-				ts->coords[i].w_major, ts->coords[i].w_minor, location, ts->touch_count,
-				ts->coords[i].status);
-#endif
-			ts->coords[i].p_press = ts->coords[i].press;
+			ts->coords[i].p_press = true;
 			ts->coords[i].p_x = ts->coords[i].x;
 			ts->coords[i].p_y = ts->coords[i].y;
-
 			ts->coords[i].p_status = 0;
 			ts->coords[i].move_count = 0;
-
 		} else if (!ts->coords[i].press && ts->coords[i].p_press) {
 			ts->touch_count--;
-
-//			if (!ts->touch_count)
-//				ts->print_info_cnt_release = 0;
-
-#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
-			input_info(true, &ts->client->dev, "[R] tId:%d loc:%s dd:%d,%d mc:%d tc:%d lx:%d ly:%d\n",
-				i, location, ts->coords[i].p_x - ts->coords[i].x,
-				ts->coords[i].p_y - ts->coords[i].y,
-				ts->coords[i].move_count, ts->touch_count,
-				ts->coords[i].x, ts->coords[i].y);
-#else
-			input_info(true, &ts->client->dev, "[R] tId:%d loc:%s dd:%d,%d mc:%d tc:%d\n",
-				i, location, ts->coords[i].p_x - ts->coords[i].x,
-				ts->coords[i].p_y - ts->coords[i].y,
-				ts->coords[i].move_count, ts->touch_count);
-#endif
 			ts->coords[i].p_press = false;
 		} else if (ts->coords[i].press) {
-			if (ts->coords[i].p_status && (ts->coords[i].status != ts->coords[i].p_status)) {
-#if !defined(CONFIG_SAMSUNG_PRODUCT_SHIP)
-				input_info(true, &ts->client->dev, "[C] tId:%d x:%d y:%d major:%d minor:%d tc:%d type:%X\n",
-					i, ts->coords[i].x, ts->coords[i].y, ts->coords[i].w_major, ts->coords[i].w_minor,
-					ts->touch_count, ts->coords[i].status);
-#else
-				input_info(true, &ts->client->dev, "[C] tId:%d major:%d minor:%d tc:%d type:%X\n",
-					i, ts->coords[i].w_major, ts->coords[i].w_minor,
-					ts->touch_count, ts->coords[i].status);
-#endif
-			}
-
 			ts->coords[i].p_status = ts->coords[i].status;
 			ts->coords[i].move_count++;
 		}
@@ -1987,7 +1914,7 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 
 	input_sync(ts->input_dev);
 
-	nvt_ts_print_coord(ts);
+	nvt_ts_update_coord(ts);
 
 XFER_ERROR:
 
@@ -2906,7 +2833,7 @@ int32_t nvt_ts_suspend(struct device *dev)
 #endif
 	input_sync(ts->input_dev);
 
-	nvt_ts_print_coord(ts);
+	nvt_ts_update_coord(ts);
 
 	msleep(50);
 
