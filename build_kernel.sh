@@ -6,6 +6,8 @@ export CC=$(pwd)/toolchain/clang/host/linux-x86/clang-r383902/bin/clang
 export CLANG_TRIPLE=arm-linux-gnueabi-
 export ARCH=arm
 export ANDROID_MAJOR_VERSION=r
+export KBUILD_BUILD_USER="Dungeon Master Kernel"
+export KBUILD_BUILD_HOST="Samsung-A022G"
 
 export KCFLAGS=-w
 export CONFIG_SECTION_MISMATCH_WARN_ONLY=y

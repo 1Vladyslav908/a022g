@@ -295,7 +295,9 @@ static void fsm_routine_exception(struct ccci_fsm_ctl *ctl,
 #if defined(CONFIG_MACH_MT6739)
 		CCCI_ERROR_LOG(ctl->md_id, FSM,
 			"No bus timeout!\n");
+#ifdef CONFIG_MTK_LASTBUS_INTERFACE
 		timeout_dump();
+#endif
 #endif
 
 		fsm_md_exception_stage(&ctl->ee_ctl, 2);

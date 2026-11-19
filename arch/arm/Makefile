@@ -104,6 +104,8 @@ tune-$(CONFIG_CPU_XSC3)		=$(call cc-option,-mtune=xscale,-mtune=strongarm110) -W
 tune-$(CONFIG_CPU_FEROCEON)	=$(call cc-option,-mtune=marvell-f,-mtune=xscale)
 tune-$(CONFIG_CPU_V6)		=$(call cc-option,-mtune=arm1136j-s,-mtune=strongarm)
 tune-$(CONFIG_CPU_V6K)		=$(call cc-option,-mtune=arm1136j-s,-mtune=strongarm)
+# DMK: perf4 tune for 4x Cortex-A53 (was no -mtune for CPU_V7)
+tune-$(CONFIG_CPU_V7)		=$(call cc-option,-mtune=cortex-a53)
 
 # Evaluate tune cc-option calls now
 tune-y := $(tune-y)

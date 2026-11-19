@@ -30,7 +30,9 @@
 #define MAX_CORE (8)
 #define MAX_FREQ (20000000)
 #define TARGET_CORE (-1)
-#define TARGET_FREQ (1183000)
+#define TARGET_FREQ (1183000)	/* DMK: old 1183000, kept as floor */
+#define KTCH_BOOST_TIMEOUT_MS (400)	/* DMK: deboost after 400 ms */
+#define KTCH_BOOST_RATE_MS (100)	/* DMK: max one boost per 100 ms */
 
 struct boost {
 	spinlock_t touch_lock;
@@ -38,6 +40,7 @@ struct boost {
 	struct task_struct *thread;
 	int touch_event;
 	atomic_t event;
+	struct delayed_work boost_work;	/* DMK: 400 ms deboost */
 };
 
 /*--------------------------------------------*/
@@ -48,6 +51,7 @@ static int ktch_mgr_enable = 1;
 static int ktch_mgr_core = 1;
 static int ktch_mgr_freq = 1;
 static int ktch_mgr_clstr = 1;
+static unsigned long ktch_last_boost;	/* DMK: rate-limit timestamp */
 
 /*--------------------FUNCTION----------------*/
 int ktch_get_target_core(void)
@@ -57,6 +61,19 @@ int ktch_get_target_core(void)
 
 int ktch_get_target_freq(void)
 {
+	unsigned int max_freq, target;
+	int clu = get_min_clstr_cap();
+
+	/* DMK: old value was TARGET_FREQ (1183000). Try 60% of runtime max;
+	 * on MT6739 60% of FY/SB max is below the lowest OPP (962 MHz), so
+	 * keep the old value as a floor to preserve a real boost.
+	 */
+	max_freq = mt_cpufreq_get_freq_by_idx(clu, 0);
+	if (max_freq) {
+		target = max_freq * 60 / 100;
+		if (target > TARGET_FREQ)
+			return target;
+	}
 	return TARGET_FREQ;
 }
 
@@ -77,6 +94,17 @@ void set_freq(int enable, int core, int freq)
 
 	update_userlimit_cpu_freq(CPU_KIR_PERFTOUCH,
 			perfmgr_clusters, freq_to_set);
+}
+
+static void ktch_deboost_work(struct work_struct *work)
+{
+	/* DMK: 400 ms timeout, clears only through PPM userlimit.
+	 * Skip if a newer touch already extended the boost.
+	 */
+	if (time_before(jiffies, ktch_last_boost +
+			msecs_to_jiffies(KTCH_BOOST_TIMEOUT_MS)))
+		return;
+	set_freq(0, 0, 0);
 }
 
 static int ktchboost_thread(void *ptr)
@@ -100,6 +128,12 @@ static int ktchboost_thread(void *ptr)
 		pr_debug("%s\n", __func__);
 		set_freq(event, core, freq);
 
+		/* DMK: arm 400 ms deboost on touch, cancel it on touch-up */
+		if (event)
+			mod_delayed_work(system_wq, &ktchboost.boost_work,
+					msecs_to_jiffies(KTCH_BOOST_TIMEOUT_MS));
+		else
+			cancel_delayed_work_sync(&ktchboost.boost_work);
 	}
 	return 0;
 }
@@ -269,20 +303,42 @@ static void dbs_input_event(struct input_handle *handle, unsigned int type,
 		unsigned int code, int value)
 {
 	unsigned long flags;
+	int down = -1;
 
 	if (!ktch_mgr_enable)
 		return;
 
-	if ((type == EV_KEY) && (code == BTN_TOUCH)) {
-		pr_debug("input cb, type:%d, code:%d, value:%d\n",
-				type, code, value);
-		spin_lock_irqsave(&ktchboost.touch_lock, flags);
-		ktchboost.touch_event = value;
-		spin_unlock_irqrestore(&ktchboost.touch_lock, flags);
+	/* DMK: keep BTN_TOUCH and also accept EV_ABS touch events */
+	if ((type == EV_KEY) && (code == BTN_TOUCH))
+		down = value ? 1 : 0;
+	else if ((type == EV_ABS) && (code == ABS_MT_TRACKING_ID))
+		down = (value >= 0) ? 1 : 0;
+	else if ((type == EV_ABS) && ((code == ABS_MT_POSITION_X) ||
+			(code == ABS_MT_POSITION_Y)))
+		down = 1;
 
-		atomic_inc(&ktchboost.event);
-		wake_up(&ktchboost.wq);
+	if (down < 0)
+		return;
+
+	spin_lock_irqsave(&ktchboost.touch_lock, flags);
+
+	/* DMK: rate-limit boost to once per 100 ms; touch-up always passes */
+	if (down &&
+		time_before(jiffies, ktch_last_boost +
+			msecs_to_jiffies(KTCH_BOOST_RATE_MS))) {
+		spin_unlock_irqrestore(&ktchboost.touch_lock, flags);
+		return;
 	}
+	if (down)
+		ktch_last_boost = jiffies;
+
+	pr_debug("input cb, type:%d, code:%d, value:%d\n",
+			type, code, value);
+	ktchboost.touch_event = down;
+	spin_unlock_irqrestore(&ktchboost.touch_lock, flags);
+
+	atomic_inc(&ktchboost.event);
+	wake_up(&ktchboost.wq);
 }
 
 static int dbs_input_connect(struct input_handler *handler,
@@ -380,6 +436,9 @@ int init_ktch(struct proc_dir_entry *parent)
 	spin_lock_init(&ktchboost.touch_lock);
 	init_waitqueue_head(&ktchboost.wq);
 	atomic_set(&ktchboost.event, 0);
+	INIT_DELAYED_WORK(&ktchboost.boost_work, ktch_deboost_work);	/* DMK */
+	ktch_last_boost = jiffies -
+			msecs_to_jiffies(KTCH_BOOST_RATE_MS);	/* DMK */
 	ktchboost.thread = (struct task_struct *)kthread_run(ktchboost_thread,
 			&ktchboost, "touch_boost");
 	if (IS_ERR(ktchboost.thread))
@@ -394,6 +453,8 @@ int ktch_suspend(void)
 {
 	/*pr_debug(TAG"perfmgr_touch_suspend\n");*/
 
+	/* DMK: cancel pending 400 ms deboost and clear touch boost */
+	cancel_delayed_work_sync(&ktchboost.boost_work);
 	set_freq(0, 0, 0);
 
 	return 0;

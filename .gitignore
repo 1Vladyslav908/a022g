@@ -3,3 +3,7 @@
 /out/
 /arch/arm/boot/Image
 /arch/arm64/boot/Image
+.aider*
+
+build.log
+.dmk28-backup/
