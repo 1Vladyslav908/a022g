@@ -5,7 +5,6 @@
 
 subdir-ccflags-y += -Werror
 ccflags-y += -I$(srctree)/drivers/misc/mediatek/include
-ccflags-y += -O3
 
 ifdef CONFIG_MTK_ION
 subdir-ccflags-y += -I$(srctree)/drivers/staging/android/ion

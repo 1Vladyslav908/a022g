@@ -34,20 +34,20 @@
 struct victim_info {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
+	struct mm_struct *mm_ref;
 	unsigned long size;
 };
 
 static struct victim_info victims[MAX_VICTIMS] __cacheline_aligned_in_smp;
 static struct task_struct *task_bucket[SHRT_MAX + 1] __cacheline_aligned;
 static DECLARE_WAIT_QUEUE_HEAD(oom_waitq);
-static DECLARE_WAIT_QUEUE_HEAD(reaper_waitq);
 static DECLARE_COMPLETION(reclaim_done);
 static __cacheline_aligned_in_smp DEFINE_RWLOCK(mm_free_lock);
 static int nr_victims;
 static bool reclaim_active;
 static atomic_t needs_reclaim = ATOMIC_INIT(0);
-static atomic_t needs_reap = ATOMIC_INIT(0);
 static atomic_t nr_killed = ATOMIC_INIT(0);
+static atomic_t init_done = ATOMIC_INIT(0);
 
 static int victim_cmp(const void *lhs_ptr, const void *rhs_ptr)
 {
@@ -124,9 +124,13 @@ static unsigned long find_victims(int *vindex)
 			if (!vtsk)
 				continue;
 
+			get_task_struct(vtsk);
+			mmgrab(vtsk->mm);
 			victims[*vindex].tsk = vtsk;
 			victims[*vindex].mm = vtsk->mm;
+			victims[*vindex].mm_ref = vtsk->mm;
 			victims[*vindex].size = get_total_mm_pages(vtsk->mm);
+			task_unlock(vtsk);
 
 			pages_found += victims[*vindex].size;
 
@@ -162,7 +166,11 @@ static int process_victims(int vlen)
 		struct task_struct *vtsk = victim->tsk;
 
 		if (pages_found >= MIN_FREE_PAGES) {
-			task_unlock(vtsk);
+			mmdrop(victim->mm_ref);
+			put_task_struct(vtsk);
+			victim->tsk = NULL;
+			victim->mm = NULL;
+			victim->mm_ref = NULL;
 		} else {
 			pages_found += victim->size;
 			nr_to_kill++;
@@ -228,25 +236,15 @@ static void scan_and_kill(void)
 		rcu_read_lock();
 		for_each_thread(vtsk, t)
 			set_tsk_thread_flag(t, TIF_MEMDIE);
-		for_each_thread(vtsk, t)
-			set_task_rt_prio(t, 1);
 		rcu_read_unlock();
 
+		set_task_rt_prio(vtsk, 1);
 		set_cpus_allowed_ptr(vtsk, cpu_all_mask);
-
 		__thaw_task(vtsk);
 
-		victim->size = get_mm_counter(mm, MM_ANONPAGES);
-
-		task_unlock(vtsk);
+		put_task_struct(vtsk);
+		victim->tsk = NULL;
 	}
-
-	write_lock(&mm_free_lock);
-	sort(victims, nr_to_kill, sizeof(*victims), victim_cmp, victim_swap);
-	atomic_set(&needs_reap, 1);
-	write_unlock(&mm_free_lock);
-	if (waitqueue_active(&reaper_waitq))
-		wake_up(&reaper_waitq);
 
 	if (!wait_for_completion_timeout(&reclaim_done, RECLAIM_EXPIRES))
 		pr_info("Timeout hit waiting for victims to die, proceeding\n");
@@ -254,8 +252,15 @@ static void scan_and_kill(void)
 	write_lock(&mm_free_lock);
 	reinit_completion(&reclaim_done);
 	reclaim_active = false;
-	nr_killed = (atomic_t)ATOMIC_INIT(0);
+	nr_victims = 0;
+	atomic_set(&nr_killed, 0);
 	write_unlock(&mm_free_lock);
+
+	for (i = 0; i < nr_to_kill; i++) {
+		mmdrop(victims[i].mm_ref);
+		victims[i].mm = NULL;
+		victims[i].mm_ref = NULL;
+	}
 }
 
 static int simple_lmk_reclaim_thread(void *data)
@@ -272,84 +277,14 @@ static int simple_lmk_reclaim_thread(void *data)
 	return 0;
 }
 
-static struct mm_struct *next_reap_victim(void)
-{
-	struct mm_struct *mm = NULL;
-	bool should_retry = false;
-	int i;
-
-	write_lock(&mm_free_lock);
-	for (i = 0; i < nr_victims; i++, mm = NULL) {
-		mm = victims[i].mm;
-		if (!mm || test_bit(MMF_OOM_SKIP, &mm->flags))
-			continue;
-
-		if (!down_read_trylock(&mm->mmap_sem)) {
-			should_retry = true;
-			continue;
-		}
-
-		if (mm_has_notifiers(mm)) {
-			up_read(&mm->mmap_sem);
-			should_retry = true;
-			continue;
-		}
-
-		if (!test_bit(MMF_OOM_SKIP, &mm->flags))
-			break;
-		up_read(&mm->mmap_sem);
-	}
-
-	if (!mm) {
-		if (should_retry)
-			mm = ERR_PTR(-EAGAIN);
-		else if (!reclaim_active)
-			nr_victims = 0;
-	}
-	write_unlock(&mm_free_lock);
-
-	return mm;
-}
-
-static void reap_victims(void)
-{
-	struct mm_struct *mm;
-
-	while ((mm = next_reap_victim())) {
-		if (IS_ERR(mm)) {
-			schedule_timeout_uninterruptible(1);
-			continue;
-		}
-
-		__oom_reap_task_mm(mm);
-		clear_bit(MMF_OOM_VICTIM, &mm->flags);
-		set_bit(MMF_OOM_SKIP, &mm->flags);
-		up_read(&mm->mmap_sem);
-	}
-}
-
-static int simple_lmk_reaper_thread(void *data)
-{
-	set_task_rt_prio(current, MAX_RT_PRIO - 2);
-	set_freezable();
-
-	while (1) {
-		wait_event_freezable(reaper_waitq,
-				     atomic_cmpxchg_relaxed(&needs_reap, 1, 0));
-		reap_victims();
-	}
-
-	return 0;
-}
-
 void simple_lmk_mm_freed(struct mm_struct *mm)
 {
 	int i;
 
-	if (!test_bit(MMF_OOM_SKIP, &mm->flags))
+	if (!test_bit(MMF_OOM_VICTIM, &mm->flags))
 		return;
 
-	read_lock(&mm_free_lock);
+	write_lock(&mm_free_lock);
 	for (i = 0; i < nr_victims; i++) {
 		if (victims[i].mm == mm) {
 			victims[i].mm = NULL;
@@ -359,11 +294,14 @@ void simple_lmk_mm_freed(struct mm_struct *mm)
 			break;
 		}
 	}
-	read_unlock(&mm_free_lock);
+	write_unlock(&mm_free_lock);
 }
 
 void simple_lmk_start_reclaim(void)
 {
+	if (!atomic_read(&init_done))
+		return;
+
 	if (atomic_cmpxchg(&needs_reclaim, 0, 1))
 		return;
 
@@ -375,13 +313,9 @@ void simple_lmk_start_reclaim(void)
 /* Initialize Simple LMK when lmkd in Android writes to the minfree parameter */
 static int simple_lmk_init_set(const char *val, const struct kernel_param *kp)
 {
-	static atomic_t init_done = ATOMIC_INIT(0);
 	struct task_struct *thread;
 
 	if (!atomic_cmpxchg(&init_done, 0, 1)) {
-		thread = kthread_run(simple_lmk_reaper_thread, NULL,
-				     "simple_lmkd_reaper");
-		BUG_ON(IS_ERR(thread));
 		thread = kthread_run(simple_lmk_reclaim_thread, NULL,
 				     "simple_lmkd");
 		BUG_ON(IS_ERR(thread));
